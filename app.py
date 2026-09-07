@@ -1,628 +1,778 @@
-"""
-app.py
-Streamlit deployment entrypoint for AI Study Pack Generator.
-
-Architecture:
-Streamlit UI
-    -> WorkflowContext
-    -> Planning
-    -> Content Generation
-    -> Assessment
-    -> Review
-    -> Refine
-    -> Final Study Pack
-"""
-
-import os
 import json
-from io import BytesIO
-
 import streamlit as st
-from openai import OpenAI
-from pypdf import PdfReader
 
-import prompts
-from workflow import WorkflowContext, execute_workflow
+from workflow import run_study_workflow
 
 
-# ------------------------------------------------------------
-# Page configuration
-# ------------------------------------------------------------
+# ============================================================
+# PAGE CONFIGURATION
+# ============================================================
 
 st.set_page_config(
     page_title="AI Study Pack Generator",
     page_icon="📚",
     layout="wide",
-    initial_sidebar_state="expanded",
-)
-
-st.markdown(
-    """
-    <style>
-    .main-title {
-        font-size: 2.5rem;
-        font-weight: 800;
-        margin-bottom: .2rem;
-    }
-    .subtitle {
-        opacity: .72;
-        font-size: 1.05rem;
-        margin-bottom: 1.4rem;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
 )
 
 
-# ------------------------------------------------------------
-# Helpers
-# ------------------------------------------------------------
+# ============================================================
+# HELPER FUNCTIONS
+# ============================================================
 
-def get_api_key():
-    try:
-        key = st.secrets.get("OPENAI_API_KEY")
-        if key:
-            return key
-    except Exception:
-        pass
+def show_workflow_progress(stage_name, progress_value):
+    """Update Streamlit workflow progress."""
+    if "workflow_status" in st.session_state:
+        st.session_state.workflow_status.info(stage_name)
 
-    return os.getenv("OPENAI_API_KEY", "")
+    if "workflow_progress" in st.session_state:
+        st.session_state.workflow_progress.progress(progress_value)
 
 
-def get_client():
-    key = get_api_key()
+def display_flashcards(flashcards):
+    """Display generated flashcards."""
 
-    if not key:
-        raise RuntimeError(
-            "OPENAI_API_KEY is missing. Add it in Streamlit Secrets."
+    if not flashcards:
+        st.info("No flashcards were generated.")
+        return
+
+    for index, card in enumerate(flashcards, start=1):
+
+        question = card.get("question", "")
+        answer = card.get("answer", "")
+
+        with st.expander(
+            f"🃏 Flashcard {index}: {question}"
+        ):
+            st.markdown("### Answer")
+            st.write(answer)
+
+
+def display_mcqs(mcqs):
+    """Display multiple-choice questions."""
+
+    if not mcqs:
+        st.info("No MCQs were generated.")
+        return
+
+    for index, question in enumerate(mcqs, start=1):
+
+        st.markdown(
+            f"### {index}. {question.get('question', '')}"
         )
 
-    return OpenAI(api_key=key)
+        options = question.get("options", [])
+
+        for option in options:
+            st.markdown(f"- {option}")
+
+        with st.expander("✅ Show answer and explanation"):
+
+            st.success(
+                f"Answer: {question.get('answer', '')}"
+            )
+
+            st.write(
+                question.get("explanation", "")
+            )
 
 
-def extract_pdf_text(uploaded_file):
-    reader = PdfReader(BytesIO(uploaded_file.getvalue()))
+def display_questions(
+    short_questions,
+    long_questions,
+):
+    """Display short and long answer questions."""
 
-    pages = []
-    for page in reader.pages:
-        pages.append(page.extract_text() or "")
+    st.subheader("✍️ Short-Answer Questions")
 
-    return "\n\n".join(pages).strip()
+    if short_questions:
 
+        for index, question in enumerate(
+            short_questions,
+            start=1
+        ):
 
-def pack_to_markdown(pack, topic):
-    lines = [f"# AI Study Pack: {topic}", ""]
+            with st.expander(
+                f"{index}. {question.get('question', '')}"
+            ):
 
-    lines += ["## Summary", pack.get("summary", ""), ""]
+                st.markdown("### Suggested Answer")
 
-    lines += ["## Learning Objectives"]
-    for item in pack.get("learning_objectives", []):
-        lines.append(f"- {item}")
-    lines.append("")
+                st.write(
+                    question.get("answer", "")
+                )
 
-    lines += ["## Key Concepts"]
-    for item in pack.get("key_concepts", []):
-        lines += [
-            f"### {item.get('term', '')}",
-            item.get("explanation", ""),
-            f"**Example:** {item.get('example', '')}",
-            "",
-        ]
-
-    lines += ["## Flashcards"]
-    for i, item in enumerate(pack.get("flashcards", []), 1):
-        lines += [
-            f"**{i}. Q:** {item.get('question', '')}",
-            f"**A:** {item.get('answer', '')}",
-            "",
-        ]
-
-    lines += ["## MCQs"]
-    for i, item in enumerate(pack.get("mcqs", []), 1):
-        lines.append(f"**{i}. {item.get('question', '')}**")
-        for option in item.get("options", []):
-            lines.append(f"- {option}")
-
-        lines += [
-            f"**Correct:** {item.get('correct_answer', '')}",
-            f"**Explanation:** {item.get('explanation', '')}",
-            "",
-        ]
-
-    lines += ["## Short-Answer Questions"]
-    for i, item in enumerate(pack.get("short_answer_questions", []), 1):
-        lines.append(f"**{i}. {item.get('question', '')}")
-        for point in item.get("answer_points", []):
-            lines.append(f"- {point}")
-        lines.append("")
-
-    lines += ["## Long-Answer Questions"]
-    for i, item in enumerate(pack.get("long_answer_questions", []), 1):
-        lines.append(f"**{i}. {item.get('question', '')}")
-        for point in item.get("answer_outline", []):
-            lines.append(f"- {point}")
-        lines.append("")
-
-    lines += ["## Study Plan"]
-    for day in pack.get("study_plan", []):
-        lines.append(
-            f"### Day {day.get('day', '')}: {day.get('focus', '')}"
+    else:
+        st.info(
+            "No short-answer questions were generated."
         )
-        for task in day.get("tasks", []):
-            lines.append(f"- {task}")
-        lines.append("")
 
-    lines += ["## Exam Tips"]
-    for tip in pack.get("exam_tips", []):
-        lines.append(f"- {tip}")
+    st.divider()
 
-    return "\n".join(lines)
+    st.subheader("📖 Long-Answer Questions")
+
+    if long_questions:
+
+        for index, question in enumerate(
+            long_questions,
+            start=1
+        ):
+
+            with st.expander(
+                f"{index}. {question.get('question', '')}"
+            ):
+
+                st.markdown(
+                    "### Answer Outline"
+                )
+
+                st.write(
+                    question.get(
+                        "answer_outline",
+                        ""
+                    )
+                )
+
+    else:
+        st.info(
+            "No long-answer questions were generated."
+        )
 
 
-# ------------------------------------------------------------
-# Header
-# ------------------------------------------------------------
+def display_study_plan(study_plan):
+    """Display the multi-week study plan."""
 
-st.markdown(
-    '<div class="main-title">📚 AI Study Pack Generator</div>',
-    unsafe_allow_html=True,
+    if not study_plan:
+        st.info("No study plan was generated.")
+        return
+
+    for week in study_plan:
+
+        week_name = week.get(
+            "week",
+            "Week"
+        )
+
+        focus = week.get(
+            "focus",
+            ""
+        )
+
+        tasks = week.get(
+            "tasks",
+            []
+        )
+
+        revision = week.get(
+            "revision",
+            ""
+        )
+
+        st.subheader(
+            f"📅 {week_name}"
+        )
+
+        if focus:
+            st.markdown(
+                f"**Focus:** {focus}"
+            )
+
+        if tasks:
+
+            st.markdown("**Tasks:**")
+
+            for task in tasks:
+                st.markdown(
+                    f"- {task}"
+                )
+
+        if revision:
+
+            st.markdown(
+                f"**Revision:** {revision}"
+            )
+
+
+def display_review(review):
+    """Display AI quality-review results."""
+
+    if not review:
+        st.info("No review information available.")
+        return
+
+    score = review.get(
+        "score",
+        "N/A"
+    )
+
+    approved = review.get(
+        "approved",
+        False
+    )
+
+    col1, col2 = st.columns(2)
+
+    with col1:
+
+        st.metric(
+            "Quality Score",
+            f"{score}/10"
+        )
+
+    with col2:
+
+        if approved:
+            st.success(
+                "✅ Study pack approved"
+            )
+        else:
+            st.warning(
+                "⚠️ Study pack required refinement"
+            )
+
+    issues = review.get(
+        "issues",
+        []
+    )
+
+    improvements = review.get(
+        "improvements",
+        []
+    )
+
+    if issues:
+
+        st.subheader(
+            "🔎 Review Findings"
+        )
+
+        for issue in issues:
+            st.markdown(
+                f"- {issue}"
+            )
+
+    if improvements:
+
+        st.subheader(
+            "🛠️ Refinements Applied"
+        )
+
+        for improvement in improvements:
+            st.markdown(
+                f"- {improvement}"
+            )
+
+
+# ============================================================
+# HEADER
+# ============================================================
+
+st.title(
+    "📚 AI Study Pack Generator"
 )
 
-st.markdown(
-    '<div class="subtitle">Personalized AI workflow: Planning → Content → '
-    'Assessment → Review → Refine</div>',
-    unsafe_allow_html=True,
+st.caption(
+    "Create a personalized study pack using a "
+    "five-stage AI workflow: Planning → Content → "
+    "Assessment → Review → Refinement."
 )
 
 
-# ------------------------------------------------------------
-# Sidebar personalization
-# ------------------------------------------------------------
+# ============================================================
+# SIDEBAR — PERSONALIZATION
+# ============================================================
 
 with st.sidebar:
-    st.header("⚙️ Personalization")
 
-    model = st.selectbox(
-        "AI model",
-        ["gpt-5-mini", "gpt-5"],
-        index=0,
+    st.header(
+        "🎓 Personalization"
+    )
+
+    st.markdown(
+        "Tell the AI about your study needs."
+    )
+
+    topic = st.text_input(
+        "📚 Topic",
+        placeholder=(
+            "Example: Python Programming"
+        ),
     )
 
     level = st.selectbox(
-        "Student level",
+        "🎓 Student Level",
         [
             "Beginner",
-            "School",
-            "High School",
-            "College / University",
-            "Professional",
+            "Intermediate",
+            "Advanced",
+            "University",
+            "Exam Preparation",
         ],
-        index=3,
+    )
+
+    weeks = st.number_input(
+        "📅 Study Duration (Weeks)",
+        min_value=1,
+        max_value=12,
+        value=4,
+        step=1,
+    )
+
+    goal = st.text_area(
+        "🎯 Study Goal",
+        placeholder=(
+            "Example: Prepare for my final exam "
+            "and understand Python fundamentals."
+        ),
+        height=120,
     )
 
     language = st.selectbox(
-        "Output language",
+        "🌐 Output Language",
         [
             "English",
             "Urdu",
-            "Roman Urdu",
+            "Hindi",
             "Arabic",
             "Spanish",
             "French",
         ],
     )
 
-    learning_goal = st.text_area(
-        "Learning goal",
-        placeholder=(
-            "Example: Prepare for my university exam and understand "
-            "the topic deeply."
-        ),
+    question_count = st.slider(
+        "⚙️ Number of Questions / Cards",
+        min_value=3,
+        max_value=15,
+        value=5,
     )
 
-    study_days = st.slider(
-        "Study duration",
-        1,
-        14,
-        5,
-    )
-
-    st.subheader("Study pack size")
-
-    concepts = st.slider("Key concepts", 5, 20, 10)
-    flashcards = st.slider("Flashcards", 5, 40, 15)
-    mcqs = st.slider("MCQs", 5, 30, 10)
-    short_questions = st.slider(
-        "Short-answer questions",
-        3,
-        20,
-        5,
-    )
-    long_questions = st.slider(
-        "Long-answer questions",
-        2,
-        10,
-        3,
+    model = st.selectbox(
+        "🤖 Groq Model",
+        [
+            "openai/gpt-oss-120b",
+            "openai/gpt-oss-20b",
+        ],
     )
 
     st.divider()
 
-    st.caption(
-        "API key is loaded from Streamlit Secrets. "
-        "Never hard-code your key in app.py."
+    st.markdown(
+        """
+        **AI Workflow**
+
+        1. 🗺️ Planning
+        2. 📝 Content Generation
+        3. ❓ Assessment
+        4. 🔎 Review
+        5. ✨ Refinement
+        """
     )
 
 
-# ------------------------------------------------------------
-# Main input
-# ------------------------------------------------------------
+# ============================================================
+# MAIN INPUT INFORMATION
+# ============================================================
 
-topic = st.text_input(
-    "📌 What do you want to study?",
-    placeholder="e.g. Python OOP, Photosynthesis, Database Normalization",
+st.subheader(
+    "📝 Study Information"
 )
 
-uploaded_file = st.file_uploader(
-    "📄 Optional: upload PDF lecture notes / textbook chapter",
-    type=["pdf"],
-)
+input_col1, input_col2 = st.columns(2)
 
-if uploaded_file:
-    st.success(f"Loaded: {uploaded_file.name}")
+with input_col1:
+
+    st.markdown(
+        f"**Topic:** "
+        f"{topic if topic else 'Not entered'}"
+    )
+
+    st.markdown(
+        f"**Level:** {level}"
+    )
+
+    st.markdown(
+        f"**Duration:** {weeks} week(s)"
+    )
+
+with input_col2:
+
+    st.markdown(
+        f"**Language:** {language}"
+    )
+
+    st.markdown(
+        f"**Questions/Cards:** {question_count}"
+    )
+
+    st.markdown(
+        f"**Goal:** "
+        f"{goal if goal else 'Not entered'}"
+    )
 
 
-counts = {
-    "concepts": concepts,
-    "flashcards": flashcards,
-    "mcqs": mcqs,
-    "short_questions": short_questions,
-    "long_questions": long_questions,
-}
+st.divider()
 
 
-# ------------------------------------------------------------
-# Workflow execution
-# ------------------------------------------------------------
+# ============================================================
+# GENERATE BUTTON
+# ============================================================
 
-if st.button(
+generate_button = st.button(
     "🚀 Generate Personalized Study Pack",
     type="primary",
     use_container_width=True,
-):
-    if not topic.strip() and not uploaded_file:
-        st.warning("Enter a topic or upload a PDF first.")
+)
+
+
+if generate_button:
+
+    if not topic.strip():
+
+        st.error(
+            "❌ Please enter a study topic."
+        )
+
         st.stop()
 
-    if not learning_goal.strip():
-        learning_goal = (
-            "Understand the topic, remember key concepts, "
-            "and prepare for assessment."
+    if not goal.strip():
+
+        st.error(
+            "❌ Please enter your study goal."
         )
+
+        st.stop()
+
+    user_data = {
+
+        "topic": topic.strip(),
+
+        "level": level,
+
+        "weeks": int(weeks),
+
+        "goal": goal.strip(),
+
+        "language": language,
+
+        "question_count": int(
+            question_count
+        ),
+
+        "model": model,
+    }
+
+    st.session_state.workflow_progress = (
+        st.progress(0)
+    )
+
+    st.session_state.workflow_status = (
+        st.empty()
+    )
 
     try:
-        client = get_client()
 
-        with st.spinner("Reading source material..."):
-            source_text = (
-                extract_pdf_text(uploaded_file)
-                if uploaded_file
-                else ""
+        with st.spinner(
+            "AI is creating your personalized study pack..."
+        ):
+
+            result = run_study_workflow(
+                user_data,
+                progress_callback=(
+                    show_workflow_progress
+                ),
             )
 
-        effective_topic = (
-            topic.strip()
-            if topic.strip()
-            else uploaded_file.name.rsplit(".", 1)[0]
+        st.session_state.study_pack = result
+
+        st.session_state.workflow_progress.progress(
+            1.0
         )
 
-        context = WorkflowContext(
-            topic=effective_topic,
-            level=level,
-            language=language,
-            learning_goal=learning_goal,
-            study_days=study_days,
-            counts=counts,
-            source_text=source_text,
+        st.session_state.workflow_status.success(
+            "✅ All five AI stages completed successfully!"
         )
 
-        progress = st.progress(0)
-        status = st.empty()
+    except Exception as error:
 
-        stage_names = [
-            "Planning",
-            "Content Generation",
-            "Assessment",
-            "Review",
-            "Refine",
-        ]
+        st.error(
+            f"❌ Workflow failed: {error}"
+        )
 
-        # Execute each stage while exposing progress in Streamlit.
-        # The workflow itself preserves context and handles stage errors.
-        for i, stage_name in enumerate(stage_names, start=1):
-            status.info(f"🔄 Running stage {i}/5: {stage_name}")
-
-            # To keep one shared context, execute_workflow is called once.
-            # The status display is updated before the actual pipeline.
-            if i == 1:
-                result = execute_workflow(
-                    context,
-                    client,
-                    model,
-                    prompts,
-                )
-
-            progress.progress(i / len(stage_names))
-
-        status.success("✅ All five AI workflow stages completed.")
-
-        st.session_state["workflow_context"] = result
-
-    except Exception as exc:
-        st.error(f"❌ Workflow failed: {exc}")
-
-        if "context" in locals() and context.errors:
-            st.subheader("Workflow error details")
-            for error in context.errors:
-                st.write(
-                    f"**{error['stage']}** — {error['error']}"
-                )
+        st.info(
+            "Check your GROQ_API_KEY in Streamlit "
+            "Secrets and try again."
+        )
 
         st.stop()
 
 
-# ------------------------------------------------------------
-# Results
-# ------------------------------------------------------------
+# ============================================================
+# DISPLAY RESULT
+# ============================================================
 
-if "workflow_context" in st.session_state:
-    context = st.session_state["workflow_context"]
-    pack = context.refined_pack
+result = st.session_state.get(
+    "study_pack"
+)
+
+
+if result:
 
     st.divider()
-    st.header("🎉 Final Personalized Study Pack")
 
-    c1, c2, c3, c4 = st.columns(4)
+    st.header(
+        "📚 Your Personalized Study Pack"
+    )
 
-    c1.metric(
-        "Concepts",
-        len(pack.get("key_concepts", [])),
+    st.subheader(
+        result.get(
+            "title",
+            "Study Pack"
+        )
     )
-    c2.metric(
-        "Flashcards",
-        len(pack.get("flashcards", [])),
+
+    st.write(
+        result.get(
+            "overview",
+            ""
+        )
     )
-    c3.metric(
-        "MCQs",
-        len(pack.get("mcqs", [])),
-    )
-    c4.metric(
-        "Study Days",
-        len(pack.get("study_plan", [])),
-    )
+
+    # ========================================================
+    # TABS
+    # ========================================================
 
     tabs = st.tabs(
         [
-            "📌 Summary",
+            "🎯 Objectives",
             "🧠 Concepts",
+            "📝 Summary",
             "🃏 Flashcards",
             "❓ MCQs",
             "✍️ Questions",
             "📅 Study Plan",
             "🎯 Exam Tips",
-            "🔍 AI Review",
-            "⚙️ Workflow",
+            "🔎 AI Review",
         ]
     )
 
-    with tabs[0]:
-        st.markdown(pack.get("summary", ""))
+    # ========================================================
+    # OBJECTIVES
+    # ========================================================
 
-        st.subheader("Learning Objectives")
-        for item in pack.get("learning_objectives", []):
-            st.markdown(f"- {item}")
+    with tabs[0]:
+
+        st.header(
+            "🎯 Learning Objectives"
+        )
+
+        objectives = result.get(
+            "learning_objectives",
+            []
+        )
+
+        for objective in objectives:
+
+            st.markdown(
+                f"- {objective}"
+            )
+
+    # ========================================================
+    # KEY CONCEPTS
+    # ========================================================
 
     with tabs[1]:
-        for item in pack.get("key_concepts", []):
-            with st.expander(item.get("term", "Concept")):
-                st.write(item.get("explanation", ""))
 
-                if item.get("example"):
-                    st.info(f"Example: {item['example']}")
+        st.header(
+            "🧠 Key Concepts"
+        )
+
+        concepts = result.get(
+            "key_concepts",
+            []
+        )
+
+        for concept in concepts:
+
+            st.markdown(
+                f"- {concept}"
+            )
+
+    # ========================================================
+    # SUMMARY
+    # ========================================================
 
     with tabs[2]:
-        for i, card in enumerate(pack.get("flashcards", []), 1):
-            with st.expander(
-                f"Card {i}: {card.get('question', '')}"
-            ):
-                st.write(card.get("answer", ""))
 
-    with tabs[3]:
-        for i, question in enumerate(
-            pack.get("mcqs", []),
-            1,
-        ):
-            st.markdown(
-                f"**{i}. {question.get('question', '')}**"
-            )
-
-            selected = st.radio(
-                "Choose an answer:",
-                question.get("options", []),
-                key=f"mcq_{i}",
-            )
-
-            with st.expander("Show answer"):
-                correct = question.get(
-                    "correct_answer",
-                    "",
-                )
-
-                if selected.startswith(correct):
-                    st.success("Correct!")
-                else:
-                    st.info(f"Correct answer: {correct}")
-
-                st.write(
-                    question.get("explanation", "")
-                )
-
-            st.divider()
-
-    with tabs[4]:
-        st.subheader("Short-Answer Questions")
-
-        for i, question in enumerate(
-            pack.get("short_answer_questions", []),
-            1,
-        ):
-            st.markdown(
-                f"**{i}. {question.get('question', '')}**"
-            )
-
-            with st.expander("Show answer points"):
-                for point in question.get(
-                    "answer_points",
-                    [],
-                ):
-                    st.markdown(f"- {point}")
-
-        st.subheader("Long-Answer Questions")
-
-        for i, question in enumerate(
-            pack.get("long_answer_questions", []),
-            1,
-        ):
-            st.markdown(
-                f"**{i}. {question.get('question', '')}**"
-            )
-
-            with st.expander("Show answer outline"):
-                for point in question.get(
-                    "answer_outline",
-                    [],
-                ):
-                    st.markdown(f"- {point}")
-
-    with tabs[5]:
-        for day in pack.get("study_plan", []):
-            st.markdown(
-                f"### Day {day.get('day', '')} — "
-                f"{day.get('focus', '')}"
-            )
-
-            for task in day.get("tasks", []):
-                st.checkbox(
-                    task,
-                    key=f"day_{day.get('day')}_{task}",
-                )
-
-    with tabs[6]:
-        for tip in pack.get("exam_tips", []):
-            st.markdown(f"- {tip}")
-
-    with tabs[7]:
-        review = context.review
-
-        st.metric(
-            "AI Quality Score",
-            review.get("quality_score", "N/A"),
+        st.header(
+            "📝 AI Summary"
         )
-
-        if review.get("passed"):
-            st.success("Review passed.")
-        else:
-            st.warning("Review identified issues.")
-
-        if review.get("strengths"):
-            st.subheader("Strengths")
-            for strength in review["strengths"]:
-                st.markdown(f"- {strength}")
-
-        if review.get("issues"):
-            st.subheader("Issues / Recommendations")
-
-            for issue in review["issues"]:
-                st.warning(
-                    f"**{issue.get('severity', '').upper()} — "
-                    f"{issue.get('section', '')}**\n\n"
-                    f"{issue.get('problem', '')}\n\n"
-                    f"Recommended fix: "
-                    f"{issue.get('recommended_fix', '')}"
-                )
-
-    with tabs[8]:
-        st.subheader("Multi-Stage Workflow")
-
-        for stage in [
-            "Planning",
-            "Content Generation",
-            "Assessment",
-            "Review",
-            "Refine",
-        ]:
-            stage_status = context.stage_status.get(
-                stage,
-                "unknown",
-            )
-
-            if stage_status == "completed":
-                st.success(f"✅ {stage}: completed")
-            elif stage_status == "failed":
-                st.error(f"❌ {stage}: failed")
-            else:
-                st.info(f"ℹ️ {stage}: {stage_status}")
-
-        st.subheader("Context Passing")
 
         st.write(
-            "The workflow context passes learner information, "
-            "plan, generated content, assessment, and review "
-            "feedback from one stage to the next."
+            result.get(
+                "summary",
+                ""
+            )
         )
 
-    # --------------------------------------------------------
-    # Downloads
-    # --------------------------------------------------------
+    # ========================================================
+    # FLASHCARDS
+    # ========================================================
+
+    with tabs[3]:
+
+        st.header(
+            "🃏 Flashcards"
+        )
+
+        display_flashcards(
+            result.get(
+                "flashcards",
+                []
+            )
+        )
+
+    # ========================================================
+    # MCQs
+    # ========================================================
+
+    with tabs[4]:
+
+        st.header(
+            "❓ Multiple-Choice Questions"
+        )
+
+        display_mcqs(
+            result.get(
+                "mcqs",
+                []
+            )
+        )
+
+    # ========================================================
+    # QUESTIONS
+    # ========================================================
+
+    with tabs[5]:
+
+        display_questions(
+
+            result.get(
+                "short_answer_questions",
+                []
+            ),
+
+            result.get(
+                "long_answer_questions",
+                []
+            ),
+        )
+
+    # ========================================================
+    # STUDY PLAN
+    # ========================================================
+
+    with tabs[6]:
+
+        st.header(
+            "📅 Personalized Study Plan"
+        )
+
+        display_study_plan(
+            result.get(
+                "study_plan",
+                []
+            )
+        )
+
+    # ========================================================
+    # EXAM TIPS
+    # ========================================================
+
+    with tabs[7]:
+
+        st.header(
+            "🎯 Exam Tips"
+        )
+
+        for tip in result.get(
+            "exam_tips",
+            []
+        ):
+
+            st.markdown(
+                f"- {tip}"
+            )
+
+    # ========================================================
+    # REVIEW
+    # ========================================================
+
+    with tabs[8]:
+
+        st.header(
+            "🔎 AI Quality Review"
+        )
+
+        display_review(
+            result.get(
+                "review",
+                {}
+            )
+        )
+
+    # ========================================================
+    # DOWNLOAD
+    # ========================================================
 
     st.divider()
-    st.subheader("⬇️ Download Study Pack")
 
-    markdown_data = pack_to_markdown(
-        pack,
-        context.topic,
+    st.header(
+        "⬇️ Download Study Pack"
+    )
+
+    markdown_data = result.get(
+        "markdown",
+        "# AI Study Pack"
     )
 
     json_data = json.dumps(
-        pack,
-        ensure_ascii=False,
+        result,
         indent=2,
+        ensure_ascii=False,
     )
 
-    d1, d2 = st.columns(2)
+    download_col1, download_col2 = (
+        st.columns(2)
+    )
 
-    with d1:
+    with download_col1:
+
         st.download_button(
-            "Download Markdown",
-            markdown_data,
-            file_name="ai_study_pack.md",
+            label="⬇️ Download Markdown",
+            data=markdown_data,
+            file_name="study_pack.md",
             mime="text/markdown",
             use_container_width=True,
         )
 
-    with d2:
+    with download_col2:
+
         st.download_button(
-            "Download JSON",
-            json_data,
-            file_name="ai_study_pack.json",
+            label="⬇️ Download JSON",
+            data=json_data,
+            file_name="study_pack.json",
             mime="application/json",
             use_container_width=True,
         )
 
 
+# ============================================================
+# FOOTER
+# ============================================================
+
 st.divider()
 
 st.caption(
     "AI Study Pack Generator • "
-    "Planning → Content Generation → Assessment → Review → Refine"
+    "Python + Streamlit + Groq • "
+    "Multi-stage AI workflow"
 )
