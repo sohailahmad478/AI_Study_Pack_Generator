@@ -1,6 +1,5 @@
+requirements.txt
+
+
 streamlit
-openai
-pypdf
-streamlit
-openai
 groq
