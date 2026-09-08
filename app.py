@@ -2,7 +2,7 @@ import os, json, time
 import streamlit as st
 from groq import Groq
 
-MODEL = "llama-3.3-70b-versatile"
+MODEL = "openai/gpt-oss-20b"
 TOKENS = {"Planning":1200,"Content Generation":1900,"Assessment":1600,"Review":1000,"Refine":2000}
 
 st.set_page_config(page_title="AI Study Pack Generator", page_icon="📚", layout="wide")
