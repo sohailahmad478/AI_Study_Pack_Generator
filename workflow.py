@@ -1,322 +1,582 @@
+# workflow.py
+#
+# AI Study Pack Generator
+# Five-stage Groq workflow:
+# 1. Planning
+# 2. Content Generation
+# 3. Assessment
+# 4. Review
+# 5. Refine
+
 import json
 import os
 import time
-from typing import Any, Callable, Optional
+from typing import Any, Callable, Dict, Optional
 
-from openai import OpenAI
-
-from prompts import (
-    planning_prompt,
-    content_prompt,
-    assessment_prompt,
-    review_prompt,
-    refine_prompt,
-)
+from groq import Groq
 
 
 # ============================================================
-# GROQ CONFIGURATION
+# CONFIGURATION
 # ============================================================
 
-def get_api_key() -> str:
+MODEL = "openai/gpt-oss-20b"
+
+MAX_RETRIES = 2
+
+MAX_TOKENS = {
+    "Planning": 1200,
+    "Content Generation": 2600,
+    "Assessment": 2200,
+    "Review": 1200,
+    "Refine": 4200,
+}
+
+
+# ============================================================
+# GROQ CLIENT
+# ============================================================
+
+def get_client() -> Groq:
     """
-    Get GROQ_API_KEY from Streamlit Secrets first,
-    then fall back to environment variables.
+    Create Groq client.
+
+    Streamlit Cloud:
+        Store GROQ_API_KEY in st.secrets.
+
+    Local:
+        Set GROQ_API_KEY as an environment variable.
     """
 
-    try:
-        import streamlit as st
-
-        key = st.secrets.get("GROQ_API_KEY")
-
-        if key:
-            return str(key).strip()
-
-    except Exception:
-        pass
-
-    key = os.getenv("GROQ_API_KEY", "")
-
-    return key.strip()
-
-
-def get_client() -> OpenAI:
-    """
-    Create an OpenAI-compatible client configured for Groq.
-    """
-
-    api_key = get_api_key()
+    api_key = os.getenv("GROQ_API_KEY")
 
     if not api_key:
-
-        raise RuntimeError(
-            "GROQ_API_KEY is missing. "
-            "Add GROQ_API_KEY to Streamlit Secrets."
-        )
-
-    return OpenAI(
-        api_key=api_key,
-        base_url="https://api.groq.com/openai/v1",
-    )
-
-
-# ============================================================
-# JSON HANDLING
-# ============================================================
-
-def extract_json(text: str) -> dict[str, Any]:
-    """
-    Convert the AI response into a Python dictionary.
-
-    Handles normal JSON as well as JSON accidentally wrapped
-    inside Markdown code fences.
-    """
-
-    if not text:
-        raise RuntimeError(
-            "The AI returned an empty response."
-        )
-
-    cleaned = text.strip()
-
-    # Remove Markdown code fences.
-    if cleaned.startswith("```"):
-
-        if cleaned.startswith("```json"):
-            cleaned = cleaned[7:]
-
-        elif cleaned.startswith("```"):
-            cleaned = cleaned[3:]
-
-        if cleaned.endswith("```"):
-            cleaned = cleaned[:-3]
-
-        cleaned = cleaned.strip()
-
-    # First attempt: parse the entire response.
-    try:
-
-        result = json.loads(cleaned)
-
-        if isinstance(result, dict):
-            return result
-
-    except json.JSONDecodeError:
-        pass
-
-    # Second attempt: locate the JSON object.
-    start = cleaned.find("{")
-    end = cleaned.rfind("}")
-
-    if start != -1 and end > start:
-
-        possible_json = cleaned[
-            start:end + 1
-        ]
-
         try:
+            import streamlit as st
 
-            result = json.loads(
-                possible_json
-            )
-
-            if isinstance(result, dict):
-                return result
-
-        except json.JSONDecodeError:
+            api_key = st.secrets.get("GROQ_API_KEY")
+        except Exception:
             pass
 
-    raise RuntimeError(
-        "The AI returned invalid JSON. "
-        "Please try generating the study pack again."
+    if not api_key:
+        raise RuntimeError(
+            "GROQ_API_KEY is missing. "
+            "Add GROQ_API_KEY to Streamlit Secrets or environment variables."
+        )
+
+    return Groq(api_key=api_key)
+
+
+# ============================================================
+# CONTEXT CONTROL
+# ============================================================
+
+def compact_json(
+    data: Any,
+    max_chars: int = 30000,
+) -> str:
+    """
+    Convert data to compact JSON.
+
+    This prevents unnecessarily large prompts between workflow stages.
+    """
+
+    text = json.dumps(
+        data,
+        ensure_ascii=False,
+        separators=(",", ":"),
+    )
+
+    if len(text) <= max_chars:
+        return text
+
+    return (
+        text[:max_chars]
+        + "\n...[context truncated for token safety]"
     )
 
 
 # ============================================================
-# AI CALL
+# STRICT JSON SCHEMAS
 # ============================================================
 
-def call_ai(
-    prompt: str,
-    model: str,
-    stage_name: str,
-    retries: int = 2,
-) -> dict[str, Any]:
-    """
-    Send a prompt to Groq using the OpenAI-compatible SDK.
+PLANNING_SCHEMA = {
+    "type": "object",
+    "properties": {
 
-    Includes retry handling for temporary API failures.
-    """
+        "study_title": {
+            "type": "string"
+        },
 
-    client = get_client()
+        "summary": {
+            "type": "string"
+        },
 
-    last_error: Optional[Exception] = None
+        "learning_objectives": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 12
+        },
 
-    for attempt in range(
-        retries + 1
-    ):
+        "key_topics": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 15
+        },
 
-        try:
+        "weekly_plan": {
+            "type": "array",
+            "items": {
+                "type": "object",
 
-            response = client.responses.create(
-                model=model,
-                input=prompt,
-            )
+                "properties": {
 
-            output_text = (
-                response.output_text
-            )
+                    "week": {
+                        "type": "integer"
+                    },
 
-            return extract_json(
-                output_text
-            )
+                    "focus": {
+                        "type": "string"
+                    },
 
-        except Exception as error:
+                    "activities": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "maxItems": 8
+                    }
+                },
 
-            last_error = error
+                "required": [
+                    "week",
+                    "focus",
+                    "activities"
+                ],
 
-            # If retries remain, wait briefly.
-            if attempt < retries:
+                "additionalProperties": False
+            },
 
-                time.sleep(2)
+            "maxItems": 12
+        }
+    },
 
-    raise RuntimeError(
-        f"{stage_name} failed after "
-        f"{retries + 1} attempts. "
-        f"Error: {last_error}"
-    )
+    "required": [
+        "study_title",
+        "summary",
+        "learning_objectives",
+        "key_topics",
+        "weekly_plan"
+    ],
+
+    "additionalProperties": False
+}
 
 
 # ============================================================
-# VALIDATION
+
+CONTENT_SCHEMA = {
+    "type": "object",
+
+    "properties": {
+
+        "summary": {
+            "type": "string"
+        },
+
+        "key_concepts": {
+            "type": "array",
+
+            "items": {
+                "type": "object",
+
+                "properties": {
+
+                    "concept": {
+                        "type": "string"
+                    },
+
+                    "explanation": {
+                        "type": "string"
+                    },
+
+                    "example": {
+                        "type": "string"
+                    }
+                },
+
+                "required": [
+                    "concept",
+                    "explanation",
+                    "example"
+                ],
+
+                "additionalProperties": False
+            },
+
+            "maxItems": 15
+        },
+
+        "flashcards": {
+            "type": "array",
+
+            "items": {
+                "type": "object",
+
+                "properties": {
+
+                    "question": {
+                        "type": "string"
+                    },
+
+                    "answer": {
+                        "type": "string"
+                    }
+                },
+
+                "required": [
+                    "question",
+                    "answer"
+                ],
+
+                "additionalProperties": False
+            },
+
+            "maxItems": 20
+        }
+    },
+
+    "required": [
+        "summary",
+        "key_concepts",
+        "flashcards"
+    ],
+
+    "additionalProperties": False
+}
+
+
 # ============================================================
 
-def validate_required_keys(
-    data: dict[str, Any],
-    required_keys: list[str],
-    stage_name: str,
-) -> None:
-    """
-    Make sure an AI stage returned the expected structure.
-    """
+ASSESSMENT_SCHEMA = {
+    "type": "object",
 
-    if not isinstance(data, dict):
+    "properties": {
 
-        raise RuntimeError(
-            f"{stage_name} returned an invalid "
-            "data structure."
-        )
+        "mcqs": {
+            "type": "array",
 
-    missing = [
-        key
-        for key in required_keys
-        if key not in data
-    ]
+            "items": {
+                "type": "object",
 
-    if missing:
+                "properties": {
 
-        raise RuntimeError(
-            f"{stage_name} is missing required "
-            f"fields: {', '.join(missing)}"
-        )
+                    "question": {
+                        "type": "string"
+                    },
 
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 4,
+                        "maxItems": 4
+                    },
 
-def validate_list_length(
-    data: dict[str, Any],
-    field: str,
-    expected: int,
-    stage_name: str,
-) -> None:
-    """
-    Validate that an AI-generated list contains
-    the requested number of items.
-    """
+                    "answer": {
+                        "type": "string"
+                    },
 
-    value = data.get(field)
+                    "explanation": {
+                        "type": "string"
+                    }
+                },
 
-    if not isinstance(value, list):
+                "required": [
+                    "question",
+                    "options",
+                    "answer",
+                    "explanation"
+                ],
 
-        raise RuntimeError(
-            f"{stage_name}: '{field}' "
-            "must be a list."
-        )
+                "additionalProperties": False
+            },
 
-    if len(value) != expected:
+            "maxItems": 15
+        },
 
-        raise RuntimeError(
-            f"{stage_name}: expected "
-            f"{expected} items in '{field}', "
-            f"but received {len(value)}."
-        )
+        "short_answer_questions": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 12
+        },
 
+        "long_answer_questions": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 8
+        }
+    },
 
-def validate_mcqs(
-    mcqs: list[dict[str, Any]]
-) -> None:
-    """
-    Validate multiple-choice questions.
-    """
+    "required": [
+        "mcqs",
+        "short_answer_questions",
+        "long_answer_questions"
+    ],
 
-    for index, mcq in enumerate(
-        mcqs,
-        start=1
-    ):
-
-        if not isinstance(
-            mcq,
-            dict
-        ):
-
-            raise RuntimeError(
-                f"MCQ {index} is invalid."
-            )
-
-        options = mcq.get(
-            "options",
-            []
-        )
-
-        answer = mcq.get(
-            "answer",
-            ""
-        )
-
-        if not isinstance(
-            options,
-            list
-        ):
-
-            raise RuntimeError(
-                f"MCQ {index} options "
-                "must be a list."
-            )
-
-        if len(options) != 4:
-
-            raise RuntimeError(
-                f"MCQ {index} must contain "
-                "exactly four options."
-            )
-
-        if answer not in options:
-
-            raise RuntimeError(
-                f"MCQ {index} answer does not "
-                "match any option."
-            )
+    "additionalProperties": False
+}
 
 
-def validate_final_pack(
-    result: dict[str, Any],
-    user: dict[str, Any],
-) -> None:
-    """
-    Validate the final refined study pack.
-    """
+# ============================================================
 
-    required_keys = [
-        "title",
-        "overview",
+REVIEW_SCHEMA = {
+    "type": "object",
+
+    "properties": {
+
+        "overall_score": {
+            "type": "integer",
+            "minimum": 0,
+            "maximum": 100
+        },
+
+        "strengths": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 8
+        },
+
+        "issues": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 8
+        },
+
+        "recommended_fixes": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 8
+        }
+    },
+
+    "required": [
+        "overall_score",
+        "strengths",
+        "issues",
+        "recommended_fixes"
+    ],
+
+    "additionalProperties": False
+}
+
+
+# ============================================================
+
+FINAL_SCHEMA = {
+    "type": "object",
+
+    "properties": {
+
+        "study_title": {
+            "type": "string"
+        },
+
+        "summary": {
+            "type": "string"
+        },
+
+        "learning_objectives": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 12
+        },
+
+        "key_concepts": {
+            "type": "array",
+
+            "items": {
+                "type": "object",
+
+                "properties": {
+
+                    "concept": {
+                        "type": "string"
+                    },
+
+                    "explanation": {
+                        "type": "string"
+                    },
+
+                    "example": {
+                        "type": "string"
+                    }
+                },
+
+                "required": [
+                    "concept",
+                    "explanation",
+                    "example"
+                ],
+
+                "additionalProperties": False
+            },
+
+            "maxItems": 15
+        },
+
+        "flashcards": {
+            "type": "array",
+
+            "items": {
+                "type": "object",
+
+                "properties": {
+
+                    "question": {
+                        "type": "string"
+                    },
+
+                    "answer": {
+                        "type": "string"
+                    }
+                },
+
+                "required": [
+                    "question",
+                    "answer"
+                ],
+
+                "additionalProperties": False
+            },
+
+            "maxItems": 20
+        },
+
+        "mcqs": {
+            "type": "array",
+
+            "items": {
+                "type": "object",
+
+                "properties": {
+
+                    "question": {
+                        "type": "string"
+                    },
+
+                    "options": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "minItems": 4,
+                        "maxItems": 4
+                    },
+
+                    "answer": {
+                        "type": "string"
+                    },
+
+                    "explanation": {
+                        "type": "string"
+                    }
+                },
+
+                "required": [
+                    "question",
+                    "options",
+                    "answer",
+                    "explanation"
+                ],
+
+                "additionalProperties": False
+            },
+
+            "maxItems": 15
+        },
+
+        "short_answer_questions": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 12
+        },
+
+        "long_answer_questions": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 8
+        },
+
+        "weekly_plan": {
+            "type": "array",
+
+            "items": {
+                "type": "object",
+
+                "properties": {
+
+                    "week": {
+                        "type": "integer"
+                    },
+
+                    "focus": {
+                        "type": "string"
+                    },
+
+                    "activities": {
+                        "type": "array",
+                        "items": {
+                            "type": "string"
+                        },
+                        "maxItems": 8
+                    }
+                },
+
+                "required": [
+                    "week",
+                    "focus",
+                    "activities"
+                ],
+
+                "additionalProperties": False
+            },
+
+            "maxItems": 12
+        },
+
+        "exam_tips": {
+            "type": "array",
+            "items": {
+                "type": "string"
+            },
+            "maxItems": 10
+        }
+    },
+
+    "required": [
+        "study_title",
         "summary",
         "learning_objectives",
         "key_concepts",
@@ -324,629 +584,444 @@ def validate_final_pack(
         "mcqs",
         "short_answer_questions",
         "long_answer_questions",
-        "study_plan",
-        "exam_tips",
-    ]
+        "weekly_plan",
+        "exam_tips"
+    ],
 
-    validate_required_keys(
-        result,
-        required_keys,
-        "Refinement stage",
-    )
-
-    question_count = int(
-        user["question_count"]
-    )
-
-    long_question_count = max(
-        3,
-        question_count // 2,
-    )
-
-    weeks = int(
-        user["weeks"]
-    )
-
-    validate_list_length(
-        result,
-        "flashcards",
-        question_count,
-        "Refinement stage",
-    )
-
-    validate_list_length(
-        result,
-        "mcqs",
-        question_count,
-        "Refinement stage",
-    )
-
-    validate_list_length(
-        result,
-        "short_answer_questions",
-        question_count,
-        "Refinement stage",
-    )
-
-    validate_list_length(
-        result,
-        "long_answer_questions",
-        long_question_count,
-        "Refinement stage",
-    )
-
-    validate_list_length(
-        result,
-        "study_plan",
-        weeks,
-        "Refinement stage",
-    )
-
-    validate_mcqs(
-        result["mcqs"]
-    )
+    "additionalProperties": False
+}
 
 
 # ============================================================
-# MARKDOWN GENERATOR
+# GENERIC GROQ CALL
 # ============================================================
 
-def create_markdown(
-    result: dict[str, Any]
-) -> str:
-    """
-    Convert the final study pack into downloadable Markdown.
-    """
+def call_stage(
+    stage: str,
+    prompt: str,
+    schema: Dict[str, Any],
+) -> Dict[str, Any]:
 
-    lines: list[str] = []
+    client = get_client()
 
-    title = result.get(
-        "title",
-        "AI Study Pack"
-    )
+    last_error = None
 
-    lines.append(
-        f"# {title}"
-    )
+    for attempt in range(MAX_RETRIES + 1):
 
-    lines.append("")
+        try:
 
-    # Overview
-    lines.append(
-        "## Overview"
-    )
+            response = client.chat.completions.create(
 
-    lines.append(
-        result.get(
-            "overview",
-            ""
-        )
-    )
+                model=MODEL,
 
-    lines.append("")
+                messages=[
+                    {
+                        "role": "user",
+                        "content": prompt
+                    }
+                ],
 
-    # Summary
-    lines.append(
-        "## Summary"
-    )
+                response_format={
+                    "type": "json_schema",
 
-    lines.append(
-        result.get(
-            "summary",
-            ""
-        )
-    )
+                    "json_schema": {
 
-    lines.append("")
+                        "name": (
+                            stage
+                            .lower()
+                            .replace(" ", "_")
+                            + "_schema"
+                        ),
 
-    # Objectives
-    lines.append(
-        "## Learning Objectives"
-    )
+                        "strict": True,
 
-    for item in result.get(
-        "learning_objectives",
-        []
-    ):
+                        "schema": schema
+                    }
+                },
 
-        lines.append(
-            f"- {item}"
-        )
+                reasoning_effort="low",
 
-    lines.append("")
+                include_reasoning=False,
 
-    # Concepts
-    lines.append(
-        "## Key Concepts"
-    )
-
-    for item in result.get(
-        "key_concepts",
-        []
-    ):
-
-        lines.append(
-            f"- {item}"
-        )
-
-    lines.append("")
-
-    # Flashcards
-    lines.append(
-        "## Flashcards"
-    )
-
-    for index, card in enumerate(
-        result.get(
-            "flashcards",
-            []
-        ),
-        start=1,
-    ):
-
-        lines.append(
-            f"### Flashcard {index}"
-        )
-
-        lines.append(
-            f"**Question:** "
-            f"{card.get('question', '')}"
-        )
-
-        lines.append(
-            f"**Answer:** "
-            f"{card.get('answer', '')}"
-        )
-
-        lines.append("")
-
-    # MCQs
-    lines.append(
-        "## Multiple-Choice Questions"
-    )
-
-    for index, mcq in enumerate(
-        result.get(
-            "mcqs",
-            []
-        ),
-        start=1,
-    ):
-
-        lines.append(
-            f"### {index}. "
-            f"{mcq.get('question', '')}"
-        )
-
-        for option in mcq.get(
-            "options",
-            []
-        ):
-
-            lines.append(
-                f"- {option}"
+                max_completion_tokens=MAX_TOKENS[stage],
             )
 
-        lines.append(
-            f"**Answer:** "
-            f"{mcq.get('answer', '')}"
-        )
-
-        lines.append(
-            f"**Explanation:** "
-            f"{mcq.get('explanation', '')}"
-        )
-
-        lines.append("")
-
-    # Short answers
-    lines.append(
-        "## Short-Answer Questions"
-    )
-
-    for index, question in enumerate(
-        result.get(
-            "short_answer_questions",
-            []
-        ),
-        start=1,
-    ):
-
-        lines.append(
-            f"### {index}. "
-            f"{question.get('question', '')}"
-        )
-
-        lines.append(
-            f"**Suggested Answer:** "
-            f"{question.get('answer', '')}"
-        )
-
-        lines.append("")
-
-    # Long answers
-    lines.append(
-        "## Long-Answer Questions"
-    )
-
-    for index, question in enumerate(
-        result.get(
-            "long_answer_questions",
-            []
-        ),
-        start=1,
-    ):
-
-        lines.append(
-            f"### {index}. "
-            f"{question.get('question', '')}"
-        )
-
-        lines.append(
-            f"**Answer Outline:** "
-            f"{question.get('answer_outline', '')}"
-        )
-
-        lines.append("")
-
-    # Study plan
-    lines.append(
-        "## Multi-Week Study Plan"
-    )
-
-    for week in result.get(
-        "study_plan",
-        []
-    ):
-
-        lines.append(
-            f"### {week.get('week', '')}"
-        )
-
-        lines.append(
-            f"**Focus:** "
-            f"{week.get('focus', '')}"
-        )
-
-        lines.append("")
-
-        lines.append(
-            "**Tasks:**"
-        )
-
-        for task in week.get(
-            "tasks",
-            []
-        ):
-
-            lines.append(
-                f"- {task}"
+            content = (
+                response
+                .choices[0]
+                .message
+                .content
             )
 
-        lines.append("")
+            if not content:
+                raise RuntimeError(
+                    f"{stage}: empty model response."
+                )
 
-        lines.append(
-            f"**Revision:** "
-            f"{week.get('revision', '')}"
-        )
+            return json.loads(content)
 
-        lines.append("")
+        except Exception as exc:
 
-    # Exam tips
-    lines.append(
-        "## Exam Tips"
-    )
+            last_error = exc
 
-    for tip in result.get(
-        "exam_tips",
-        []
-    ):
+            error_text = str(exc)
 
-        lines.append(
-            f"- {tip}"
-        )
+            # Do not waste retries on an oversized request.
+            if (
+                "413" in error_text
+                or "Request too large" in error_text
+            ):
+                raise RuntimeError(
+                    f"{stage}: request too large. "
+                    "Reduce the content counts."
+                ) from exc
 
-    return "\n".join(lines)
+            # Schema errors should normally not happen with strict
+            # structured outputs, but retrying can handle transient API issues.
+            if attempt < MAX_RETRIES:
+                time.sleep(1.5 * (attempt + 1))
+                continue
+
+            raise RuntimeError(
+                f"{stage} failed after "
+                f"{MAX_RETRIES + 1} attempts: "
+                f"{error_text}"
+            ) from exc
+
+    raise RuntimeError(str(last_error))
 
 
 # ============================================================
-# MAIN FIVE-STAGE WORKFLOW
+# MAIN WORKFLOW
 # ============================================================
 
-def run_study_workflow(
-    user: dict[str, Any],
+def run_workflow(
+    topic: str,
+    level: str,
+    weeks: int,
+    learning_goal: str,
+    language: str = "English",
+
+    concept_count: int = 6,
+    flashcard_count: int = 8,
+    mcq_count: int = 6,
+    short_count: int = 4,
+    long_count: int = 2,
+
     progress_callback: Optional[
-        Callable[[str, float], None]
+        Callable[[int, str], None]
     ] = None,
-) -> dict[str, Any]:
-    """
-    Execute the complete five-stage AI workflow.
+) -> Dict[str, Any]:
 
-    Stages:
-
-    1. Planning
-    2. Content Generation
-    3. Assessment
-    4. Review
-    5. Refinement
-
-    Each stage receives context from previous stages.
-    """
-
-    model = user.get(
-        "model",
-        "openai/gpt-oss-120b"
-    )
-
-    # --------------------------------------------------------
-    # Shared workflow context
-    # --------------------------------------------------------
-
-    context: dict[str, Any] = {
-
-        "student": user,
-
-        "planning": None,
-
-        "content": None,
-
-        "assessment": None,
-
-        "review": None,
-
-        "final": None,
+    learner = {
+        "topic": topic,
+        "level": level,
+        "weeks": weeks,
+        "learning_goal": learning_goal,
+        "language": language,
     }
 
-    def update_progress(
-        message: str,
-        value: float
-    ):
-
-        if progress_callback:
-
-            progress_callback(
-                message,
-                value
-            )
 
     # ========================================================
-    # STAGE 1 — PLANNING
+    # 1. PLANNING
     # ========================================================
 
-    update_progress(
-        "🗺️ Stage 1/5 — AI Planning...",
-        0.05,
+    if progress_callback:
+        progress_callback(
+            1,
+            "Planning"
+        )
+
+    planning_prompt = f"""
+You are the planning stage of an AI Study Pack Generator.
+
+Create a practical study plan for this learner.
+
+Learner:
+{compact_json(learner, 5000)}
+
+Requirements:
+
+- Topic: {topic}
+- Level: {level}
+- Duration: {weeks} weeks
+- Learning goal: {learning_goal}
+- Language: {language}
+
+Create exactly {weeks} weekly plan entries.
+
+Prioritize the most important knowledge first.
+
+Make the plan realistic and educational.
+
+Do not create assessment questions.
+
+Return only the structured result required by the JSON schema.
+"""
+
+    planning = call_stage(
+        "Planning",
+        planning_prompt,
+        PLANNING_SCHEMA,
     )
 
-    planning = call_ai(
-        planning_prompt(
-            user
-        ),
-        model,
-        "Planning stage",
-    )
-
-    validate_required_keys(
-        planning,
-        [
-            "topic",
-            "level",
-            "goal",
-            "weeks",
-            "learning_strategy",
-            "difficulty_progression",
-            "weekly_topics",
-            "assessment_strategy",
-        ],
-        "Planning stage",
-    )
-
-    validate_list_length(
-        planning,
-        "weekly_topics",
-        int(user["weeks"]),
-        "Planning stage",
-    )
-
-    context["planning"] = planning
 
     # ========================================================
-    # STAGE 2 — CONTENT GENERATION
+    # 2. CONTENT GENERATION
     # ========================================================
 
-    update_progress(
-        "📝 Stage 2/5 — Content Generation...",
-        0.25,
+    if progress_callback:
+        progress_callback(
+            2,
+            "Content Generation"
+        )
+
+    content_prompt = f"""
+You are the content-generation stage of an AI Study Pack Generator.
+
+Create high-quality learning material.
+
+Learner:
+{compact_json(learner, 5000)}
+
+Study plan:
+{compact_json(planning, 12000)}
+
+Requirements:
+
+- Create exactly {concept_count} key concepts.
+- Create exactly {flashcard_count} flashcards.
+- Explain everything at the learner's level.
+- Use simple and accurate explanations.
+- Include useful examples.
+- Write in {language}.
+- Avoid unnecessary repetition.
+- Do not create MCQs or exam questions.
+
+Return only the structured result required by the JSON schema.
+"""
+
+    content = call_stage(
+        "Content Generation",
+        content_prompt,
+        CONTENT_SCHEMA,
     )
 
-    content = call_ai(
-        content_prompt(
-            user,
-            planning,
-        ),
-        model,
-        "Content generation stage",
-    )
-
-    validate_required_keys(
-        content,
-        [
-            "title",
-            "overview",
-            "summary",
-            "learning_objectives",
-            "key_concepts",
-            "flashcards",
-        ],
-        "Content generation stage",
-    )
-
-    validate_list_length(
-        content,
-        "flashcards",
-        int(user["question_count"]),
-        "Content generation stage",
-    )
-
-    context["content"] = content
 
     # ========================================================
-    # STAGE 3 — ASSESSMENT
+    # 3. ASSESSMENT
     # ========================================================
 
-    update_progress(
-        "❓ Stage 3/5 — Assessment Generation...",
-        0.45,
+    if progress_callback:
+        progress_callback(
+            3,
+            "Assessment"
+        )
+
+    assessment_prompt = f"""
+You are the assessment stage of an AI Study Pack Generator.
+
+Create assessment questions based ONLY on the generated
+study material.
+
+Learner:
+{compact_json(learner, 5000)}
+
+Study material:
+{compact_json(content, 24000)}
+
+Requirements:
+
+- Create exactly {mcq_count} MCQs.
+- Every MCQ must have exactly 4 options.
+- The answer must exactly match one option.
+- Every explanation must explain why the answer is correct.
+- Create exactly {short_count} short-answer questions.
+- Create exactly {long_count} long-answer questions.
+- Match the learner's level.
+- Write in {language}.
+- Do not ask questions about information missing from the study material.
+
+Return only the structured result required by the JSON schema.
+"""
+
+    assessment = call_stage(
+        "Assessment",
+        assessment_prompt,
+        ASSESSMENT_SCHEMA,
     )
 
-    assessment = call_ai(
-        assessment_prompt(
-            user,
-            planning,
-            content,
-        ),
-        model,
-        "Assessment stage",
-    )
-
-    validate_required_keys(
-        assessment,
-        [
-            "mcqs",
-            "short_answer_questions",
-            "long_answer_questions",
-        ],
-        "Assessment stage",
-    )
-
-    question_count = int(
-        user["question_count"]
-    )
-
-    long_question_count = max(
-        3,
-        question_count // 2,
-    )
-
-    validate_list_length(
-        assessment,
-        "mcqs",
-        question_count,
-        "Assessment stage",
-    )
-
-    validate_list_length(
-        assessment,
-        "short_answer_questions",
-        question_count,
-        "Assessment stage",
-    )
-
-    validate_list_length(
-        assessment,
-        "long_answer_questions",
-        long_question_count,
-        "Assessment stage",
-    )
-
-    validate_mcqs(
-        assessment["mcqs"]
-    )
-
-    context["assessment"] = assessment
 
     # ========================================================
-    # STAGE 4 — REVIEW
+    # 4. REVIEW
     # ========================================================
 
-    update_progress(
-        "🔎 Stage 4/5 — AI Quality Review...",
-        0.65,
-    )
+    if progress_callback:
+        progress_callback(
+            4,
+            "Review"
+        )
 
-    review = call_ai(
-        review_prompt(
-            user,
-            planning,
-            content,
-            assessment,
-        ),
-        model,
-        "Review stage",
-    )
+    review_context = {
+        "learner": learner,
 
-    validate_required_keys(
-        review,
-        [
-            "approved",
-            "score",
-            "issues",
-            "improvements",
-        ],
-        "Review stage",
-    )
+        "planning": planning,
 
-    context["review"] = review
+        "content": content,
 
-    # ========================================================
-    # STAGE 5 — REFINEMENT
-    # ========================================================
-
-    update_progress(
-        "✨ Stage 5/5 — Refining Final Study Pack...",
-        0.85,
-    )
-
-    final_pack = call_ai(
-        refine_prompt(
-            user,
-            planning,
-            content,
-            assessment,
-            review,
-        ),
-        model,
-        "Refinement stage",
-    )
-
-    validate_final_pack(
-        final_pack,
-        user,
-    )
-
-    # Use the review generated during the actual review stage.
-    final_pack["review"] = review
-
-    # Add workflow information for transparency.
-    final_pack["workflow"] = {
-
-        "stages": [
-            "Planning",
-            "Content Generation",
-            "Assessment",
-            "Review",
-            "Refinement",
-        ],
-
-        "context_passing": True,
-
-        "retry_enabled": True,
-
-        "json_validation": True,
-
-        "error_handling": True,
+        "assessment": assessment,
     }
 
-    # Generate downloadable Markdown.
-    final_pack["markdown"] = create_markdown(
-        final_pack
+    review_prompt = f"""
+You are the quality-control stage of an AI Study Pack Generator.
+
+Review the generated study pack.
+
+Study pack:
+{compact_json(review_context, 38000)}
+
+Check:
+
+1. Accuracy.
+2. Internal consistency.
+3. Suitability for the learner's level.
+4. Coverage of the learning goal.
+5. Clarity.
+6. Repetition.
+7. Quality of explanations.
+8. MCQ correctness.
+9. Whether MCQs have exactly four options.
+10. Whether MCQ answers match their options.
+11. Whether the assessment matches the study material.
+
+Give a score from 0 to 100.
+
+List concrete strengths.
+
+List concrete issues.
+
+List concrete recommended fixes.
+
+Do NOT rewrite the study pack.
+
+Return only the structured result required by the JSON schema.
+"""
+
+    review = call_stage(
+        "Review",
+        review_prompt,
+        REVIEW_SCHEMA,
     )
 
-    context["final"] = final_pack
 
-    update_progress(
-        "✅ Completed: all five AI stages.",
-        1.0,
+    # ========================================================
+    # 5. REFINE
+    # ========================================================
+    #
+    # IMPORTANT:
+    # Do not send every previous prompt and every previous response.
+    # We send only the data needed to produce the final pack.
+    #
+    # This is designed to prevent the previous 413 error.
+    # ========================================================
+
+    if progress_callback:
+        progress_callback(
+            5,
+            "Refine"
+        )
+
+    refine_context = {
+
+        "learner": learner,
+
+        "planning": {
+            "study_title": planning.get(
+                "study_title",
+                ""
+            ),
+
+            "learning_objectives": planning.get(
+                "learning_objectives",
+                []
+            ),
+
+            "weekly_plan": planning.get(
+                "weekly_plan",
+                []
+            ),
+        },
+
+        "content": content,
+
+        "assessment": assessment,
+
+        "review": review,
+    }
+
+    refine_prompt = f"""
+You are the final refinement stage of an AI Study Pack Generator.
+
+Create the FINAL study pack.
+
+Input:
+{compact_json(refine_context, 42000)}
+
+Apply the review recommendations.
+
+Rules:
+
+- Preserve correct useful content.
+- Fix inaccurate or unclear content.
+- Improve explanations where necessary.
+- Keep the learner's level in mind.
+- Keep the learning goal central.
+- Write everything in {language}.
+- Do not add information that conflicts with the source material.
+- Do not include commentary about the workflow.
+- Return only the final structured study pack.
+
+Required quantities:
+
+Key concepts: {concept_count}
+Flashcards: {flashcard_count}
+MCQs: {mcq_count}
+Short questions: {short_count}
+Long questions: {long_count}
+
+MCQ rules:
+
+- Exactly 4 options per MCQ.
+- The answer must exactly match one option.
+- Explanation must support the answer.
+
+The result must be complete but concise.
+
+Return ONLY the structured JSON required by the schema.
+"""
+
+    final_pack = call_stage(
+        "Refine",
+        refine_prompt,
+        FINAL_SCHEMA,
     )
 
-    return final_pack
+
+    # ========================================================
+    # RETURN COMPLETE WORKFLOW
+    # ========================================================
+
+    return {
+
+        "learner": learner,
+
+        "planning": planning,
+
+        "content": content,
+
+        "assessment": assessment,
+
+        "review": review,
+
+        "final": final_pack,
+    }
